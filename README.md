@@ -31,6 +31,7 @@ Name                            | Description
 --------------------------------|--------------------------
 [OpReturn](./src/OpReturn.ts)   | Tag data in a non-spendable script
 [Metant](./src/Metanet.ts)      | Create transactions that follow the Metanet protocol
+[MultiPushDrop](./src/MultiPushDrop.ts)      | Create data tokens with multiple trusted owners
 
 ## Contribution Guidelines
 
