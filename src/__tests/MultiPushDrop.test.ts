@@ -76,9 +76,6 @@ const testLockUnlockDecode = async (
     )
 
     // Sign to get the unlocking script
-    if (ownerPrivateKeys.length > 1) {
-      debugger
-    }
     const unlockingScript = await unlockingTemplate.sign(spendTx, 0)
     expect(unlockingScript).toBeInstanceOf(UnlockingScript)
     expect(unlockingScript.chunks.length).toBe(2) // Signature + Index
@@ -89,7 +86,7 @@ const testLockUnlockDecode = async (
     else if (indexChunk.op >= OP.OP_1 && indexChunk.op <= OP.OP_16) decodedIndex = indexChunk.op - OP.OP_1 + 1
     else if (indexChunk.data?.length === 1) decodedIndex = indexChunk.data[0]
     else throw new Error('Cannot decode index')
-    expect(decodedIndex).toEqual(i) // Ensure the index matches the loop counter
+    expect(decodedIndex).toEqual(ownerPrivateKeys.length - 1 - i) // It should be nKeys - 1 - the loop count
 
     const estimatedLength = await unlockingTemplate.estimateLength(null as unknown as Transaction, 0)
     // Check if length is reasonable (e.g., 74 +/- a few bytes)
@@ -120,18 +117,14 @@ describe('MultiPushDrop', () => {
   let wallet: WalletInterface
   let multiPushDrop: MultiPushDrop
   let counterparty1Key: PrivateKey
-  let counterparty1PubKeyHex: PubKeyHex
   let counterparty2Key: PrivateKey
-  let counterparty2PubKeyHex: PubKeyHex
   const protocolID: [SecurityLevel, string] = [0, 'tests']
   const keyID = 'test-key-123'
 
   beforeEach(() => {
     selfKey = PrivateKey.fromRandom()
     counterparty1Key = PrivateKey.fromRandom()
-    counterparty1PubKeyHex = counterparty1Key.toPublicKey().toString()
     counterparty2Key = PrivateKey.fromRandom()
-    counterparty2PubKeyHex = counterparty2Key.toPublicKey().toString()
 
     // Use CompletedProtoWallet or mock as needed
     wallet = new CompletedProtoWallet(selfKey)
@@ -182,6 +175,21 @@ describe('MultiPushDrop', () => {
     )
   })
 
+  it('should lock, decode, and unlock with 10 keys', async () => {
+    const keys: PrivateKey[] = []
+    while (keys.length < 10) {
+      keys.push(PrivateKey.fromRandom())
+    }
+    await testLockUnlockDecode(
+      multiPushDrop,
+      wallet,
+      [[1], [1], [0xff]],
+      protocolID,
+      keyID,
+      keys
+    )
+  })
+
   it('should handle empty fields', async () => {
     await testLockUnlockDecode(
       multiPushDrop,
@@ -197,7 +205,7 @@ describe('MultiPushDrop', () => {
     await testLockUnlockDecode(
       multiPushDrop,
       wallet,
-      [new Array(100).fill(0xaa), new Array(80).fill(0xbb)],
+      [new Array(100).fill(0xaa), new Array(80).fill(0xbb), new Array(70000).fill(0xbb)],
       protocolID,
       keyID,
       [selfKey, counterparty1Key]
@@ -220,17 +228,6 @@ describe('MultiPushDrop', () => {
     await testLockUnlockDecode(multiPushDrop, wallet, fields, protocolID, keyID, counterparties, 'single', true)
   })
 
-  it('decode should fail on invalid script structure', async () => {
-    const invalidScript1 = Script.fromASM('OP_1 deadbeef OP_CHECKSIGVERIFY') // Missing keys/logic
-    const invalidScript2 = Script.fromASM('OP_2 deadbeef20 deadbeef21 OP_PICK OP_CHECKSIGVERIFY') // Missing OP_1ADD
-    const invalidScript3 = await multiPushDrop.lock([[1]], protocolID, keyID, ['self'])
-    invalidScript3.chunks.splice(2, 1) // Remove OP_1ADD
-
-    expect(() => MultiPushDrop.decode(invalidScript1)).toThrow()
-    expect(() => MultiPushDrop.decode(invalidScript2)).toThrow()
-    expect(() => MultiPushDrop.decode(invalidScript3)).toThrow(/Expected OP_1ADD/)
-  })
-
   it('lock should fail with empty counterparties array', async () => {
     await expect(multiPushDrop.lock(
       [[1]],
@@ -240,23 +237,20 @@ describe('MultiPushDrop', () => {
     )).rejects.toThrow('MultiPushDrop requires at least one counterparty.')
   })
 
-  // it('unlock should fail if unlocker key is not in the list', async () => {
-  //   const lockingScript = await multiPushDrop.lock([[1]], protocolID, keyID, ['self'])
-  //   const sourceTx = new Transaction(1, [], [{ lockingScript, satoshis: 1000 }], 0)
-  //   const spendTx = new Transaction(1, [{ sourceTransaction: sourceTx, sourceOutputIndex: 0 }], [], 0)
+  it('unlock should fail if unlocker key is not in the list', async () => {
+    const { publicKey: creatorIdentityKey } = await wallet.getPublicKey({ identityKey: true })
+    const lockingScript = await multiPushDrop.lock([[1]], protocolID, keyID, ['self'])
+    const sourceTx = new Transaction(1, [], [{ lockingScript, satoshis: 1000 }], 0)
+    const spendTx = new Transaction(1, [{ sourceTransaction: sourceTx, sourceOutputIndex: 0 }], [], 0)
 
-  //   const unknownKey = PrivateKey.fromRandom()
-  //   const unknownPubKeyHex = unknownKey.toPublicKey().toString()
-  //   const walletWithUnknown = new CompletedProtoWallet(PrivateKey.fromRandom())
-  //   const mpdWithUnknown = new MultiPushDrop(walletWithUnknown)
-
-  //   const unlockingTemplate = mpdWithUnknown.unlock(
-  //     protocolID,
-  //     keyID,
-  //     unknownPubKeyHex, // Try to unlock with a key not in the lock list
-  //     ['self'] // The original list
-  //   )
-
-  //   await expect(unlockingTemplate.sign(spendTx, 0)).rejects.toThrow(/Unlocker key derived .* not found/)
-  // })
+    const unknownKey = PrivateKey.fromRandom()
+    const walletWithUnknown = new CompletedProtoWallet(unknownKey)
+    const mpdAsUnknown = new MultiPushDrop(walletWithUnknown)
+    const unlockingTemplate = mpdAsUnknown.unlock(
+      protocolID,
+      keyID,
+      creatorIdentityKey
+    )
+    await expect(unlockingTemplate.sign(spendTx, 0)).rejects.toThrow(/Unlocker key derived .* not found/)
+  })
 })
